@@ -1,0 +1,5 @@
+2026-08-01T23:54:15.415Z [DEBUG] MutationObserver started 
+2026-08-01T23:54:15.418Z [DEBUG] Periodic monitor started 
+2026-08-01T23:54:15.420Z [INFO] Game Hunting script initialized {"settings":{"minFF":0,"maxFF":5,"minStat":0,"maxStat":999999999,"minBet":13,"apiKey":"","monitorOn":true,"requireKnownFF":true,"debugEnabled":true,"testExtractionCount":8}}
+2026-08-01T23:54:37.525Z [INFO] Settings reset to defaults 
+2026-08-01T23:54:42.191Z [INFO] Test extraction ran {"count":8}
