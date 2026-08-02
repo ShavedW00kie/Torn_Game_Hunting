@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Game Hunting - Russian Roulette Monitor & Filter (FFScouter aware)
 // @namespace    https://www.torn.com/
-// @version      1.3.0
+// @version      1.4.0
 // @description  Visual filter & monitor for Torn.com Russian Roulette lobby. Integrates FFScouter DOM notes, optional Torn API health checks. Does NOT automate actions (no auto-click). For Tampermonkey/Greasemonkey. See install instructions below.
 // @author       ShavedW00kie (via Copilot Space)
 // @homepageURL  https://github.com/ShavedW00kie
@@ -17,14 +17,13 @@
 // ==/UserScript==
 
 /*
- Version 1.3.0 - Robust name / FF / pot heuristics, improved Test Extraction and logging.
-
- Key additions:
- - getDisplayNameFromAnchor(anchor): more robust name extraction (title, aria, nested spans, siblings).
- - heuristicExtractFFAndStats expanded to scan data-* attributes and FFScouter class patterns (wider radius).
- - findPotOrBetInRow expanded to look for pot/bet nodes and attributes.
- - Test Extraction now prints: displayName, anchorText, anchor attributes, row snippet, heuristic sources found.
- - Additional debug logging to help iterate with real DOM.
+ Version 1.4.0 - Patch Now update
+ - Robust display name extraction now inspects adjacent text nodes and parent text for "Name:" patterns.
+ - Expanded FF/Stats heuristics: global lookups for "FF" tokens, proximity mapping, additional data-* and class scanning.
+ - Improved pot extraction and additional data attribute checks.
+ - Test Extraction now supports "Include full row HTML" checkbox to dump row.innerHTML for debugging.
+ - Enhanced debug logging remains in place.
+ - Keeps all previous UI, debug panel, Recent Winners, and strict no-automation policy.
 */
 
 /* =========================
@@ -40,7 +39,8 @@ const DEFAULTS = {
   monitorOn: false,
   requireKnownFF: false,
   debugEnabled: false,
-  testExtractionCount: 8
+  testExtractionCount: 8,
+  includeFullRowHTML: false
 };
 
 function loadSettings() {
@@ -54,7 +54,8 @@ function loadSettings() {
     monitorOn: Boolean(GM_getValue("gh_monitorOn", DEFAULTS.monitorOn)),
     requireKnownFF: Boolean(GM_getValue("gh_requireKnownFF", DEFAULTS.requireKnownFF)),
     debugEnabled: Boolean(GM_getValue("gh_debugEnabled", DEFAULTS.debugEnabled)),
-    testExtractionCount: Number(GM_getValue("gh_testExtractionCount", DEFAULTS.testExtractionCount))
+    testExtractionCount: Number(GM_getValue("gh_testExtractionCount", DEFAULTS.testExtractionCount)),
+    includeFullRowHTML: Boolean(GM_getValue("gh_includeFullRowHTML", DEFAULTS.includeFullRowHTML))
   };
 }
 
@@ -69,14 +70,15 @@ function saveSettings(s) {
   GM_setValue("gh_requireKnownFF", Boolean(s.requireKnownFF));
   GM_setValue("gh_debugEnabled", Boolean(s.debugEnabled));
   GM_setValue("gh_testExtractionCount", Number(s.testExtractionCount));
+  GM_setValue("gh_includeFullRowHTML", Boolean(s.includeFullRowHTML));
 }
 
 let settings = loadSettings();
 
 /* =========================
-   Simple logging buffer & helpers
+   Logging utilities
    ========================= */
-const LOG_BUFFER_MAX = 300;
+const LOG_BUFFER_MAX = 400;
 const logBuffer = [];
 function pushLog(level, msg, meta) {
   const entry = { ts: Date.now(), level, msg: String(msg), meta: meta || null };
@@ -97,7 +99,7 @@ function logWarn(m, meta){ pushLog("warn", m, meta); }
 function logError(m, meta){ pushLog("error", m, meta); }
 
 /* =========================
-   Utilities
+   Small helpers
    ========================= */
 function parseNumber(str) {
   if (typeof str !== "string") return NaN;
@@ -116,7 +118,6 @@ function parseNumber(str) {
   if (m2) return parseFloat(m2[0]);
   return NaN;
 }
-
 function escapeHtml(s) {
   return String(s || "").replace(/[&<>"']/g, function (m) {
     return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[m];
@@ -124,17 +125,16 @@ function escapeHtml(s) {
 }
 
 /* =========================
-   Styles (do not override text color)
+   CSS (do not override text color)
    ========================= */
 function addStyles() {
   GM_addStyle(`
     .gh-btn { display:inline-block; margin-right:8px; padding:6px 9px; border-radius:3px; cursor:pointer; background:rgba(0,0,0,0.12); color:inherit; border:1px solid rgba(255,255,255,0.06); font-size:13px; }
     .gh-btn.gh-primary { background:linear-gradient(180deg,#2ecc71,#27ae60); color:inherit; border-color:rgba(0,0,0,0.2); font-weight:600; }
     .gh-btn.gh-toggle-active { box-shadow:0 0 0 2px rgba(39,174,96,0.12) inset; }
-    .gh-modal { position:fixed; z-index:999999; left:50%; top:50%; transform:translate(-50%,-50%); width:560px; max-width:96%; background:rgba(20,20,20,0.96); color:var(--text-color,#fff); border-radius:8px; padding:14px; box-shadow:0 8px 30px rgba(0,0,0,0.6); font-family:Arial, sans-serif; font-size:13px; }
-    .gh-modal h2 { margin:0 0 8px 0; font-size:16px; }
+    .gh-modal { position:fixed; z-index:999999; left:50%; top:50%; transform:translate(-50%,-50%); width:620px; max-width:96%; background:rgba(20,20,20,0.96); color:var(--text-color,#fff); border-radius:8px; padding:14px; box-shadow:0 8px 30px rgba(0,0,0,0.6); font-family:Arial, sans-serif; font-size:13px; }
     .gh-row { display:flex; gap:8px; align-items:center; margin:8px 0; }
-    .gh-row label { width:170px; font-size:13px; opacity:0.95; }
+    .gh-row label { width:180px; font-size:13px; opacity:0.95; }
     .gh-row input[type="number"], .gh-row input[type="text"] { flex:1; padding:6px; border-radius:4px; border:1px solid rgba(255,255,255,0.06); background:rgba(0,0,0,0.35); color:var(--text-color,#fff); }
     .gh-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:12px; }
     .gh-winner { background: linear-gradient(90deg, rgba(40,140,60,0.06), rgba(80,180,80,0.03)); border-left:3px solid #2ecc71; }
@@ -142,9 +142,9 @@ function addStyles() {
     .gh-hidden { opacity:0.28 !important; filter:grayscale(60%); }
     .gh-attack { margin-left:8px; color:inherit; background:transparent; border:none; cursor:pointer; font-size:12px; vertical-align:middle; text-decoration:none; display:inline-flex; align-items:center; gap:6px; }
     .gh-attack .gh-crosshair { width:16px; height:16px; border:2px solid rgba(255,255,255,0.85); border-radius:50%; box-sizing:border-box; }
-    #gh-recent-winners { position:fixed; right:12px; top:120px; z-index:999998; width:260px; background:rgba(10,10,10,0.5); padding:8px; border-radius:8px; border:1px solid rgba(255,255,255,0.04); color:var(--text-color,#fff); max-height:60vh; overflow:auto; font-size:13px; }
+    #gh-recent-winners { position:fixed; right:12px; top:120px; z-index:999998; width:280px; background:rgba(10,10,10,0.5); padding:8px; border-radius:8px; border:1px solid rgba(255,255,255,0.04); color:var(--text-color,#fff); max-height:60vh; overflow:auto; font-size:13px; }
     .gh-recent-entry { display:flex; align-items:center; justify-content:space-between; padding:6px 8px; border-radius:5px; margin-bottom:6px; background:rgba(0,0,0,0.25); }
-    #gh-debug-panel { position:fixed; left:12px; bottom:12px; z-index:999999; width:420px; max-height:50vh; overflow:auto; background:rgba(0,0,0,0.7); padding:8px; border-radius:8px; border:1px solid rgba(255,255,255,0.06); color:var(--text-color,#fff); font-size:12px; display:none; }
+    #gh-debug-panel { position:fixed; left:12px; bottom:12px; z-index:999999; width:460px; max-height:50vh; overflow:auto; background:rgba(0,0,0,0.7); padding:8px; border-radius:8px; border:1px solid rgba(255,255,255,0.06); color:var(--text-color,#fff); font-size:12px; display:none; }
     .gh-log-entry { padding:4px 6px; border-radius:4px; margin-bottom:4px; }
     .gh-log-entry.debug { background: rgba(255,255,255,0.02); }
     .gh-log-entry.info { background: rgba(39,174,96,0.04); }
@@ -154,7 +154,7 @@ function addStyles() {
 }
 
 /* =========================
-   DOM discovery & parsing helpers
+   DOM helpers & discovery
    ========================= */
 
 function findProfileAnchorsInRegion(root = document) {
@@ -181,13 +181,17 @@ function extractUserIdFromHref(href = "") {
   return m2 ? m2[1] : null;
 }
 
-/* Get the most-likely display name for a profile anchor. Robust to icons/empty anchor text. */
+/* Robust display name extraction:
+   - Prefer visible anchor text if not generic.
+   - Inspect anchor attributes (title/aria/data-*).
+   - Inspect nested elements (img.alt, spans).
+   - Inspect previous text nodes / parent text nodes for pattern "Name:".
+*/
 function getDisplayNameFromAnchor(a) {
   if (!a) return "Unknown";
   const rawText = (a.textContent || "").trim();
-  // if anchor has a clear human name (not 'View Profile', not empty), prefer it
   if (rawText && !/view profile|profile|details|click here/i.test(rawText) && rawText.length > 1) return rawText;
-  // check common attributes
+
   const attrCandidates = [
     a.getAttribute("title"),
     a.getAttribute("aria-label"),
@@ -196,36 +200,58 @@ function getDisplayNameFromAnchor(a) {
     a.getAttribute("data-name"),
     a.getAttribute("data-username")
   ];
-  for (const x of attrCandidates) if (x && x.trim()) return x.trim();
-  // check nested elements inside anchor (images with alt, spans)
+  for (const x of attrCandidates) if (x && x.trim() && !/view profile/i.test(x)) return x.trim();
+
   const img = a.querySelector("img[alt]");
-  if (img && (img.alt || "").trim()) return img.alt.trim();
+  if (img && (img.alt || "").trim() && !/avatar|profile image|profile/i.test(img.alt)) return img.alt.trim();
+
   const spanName = a.querySelector("span.name, span.player-name, span.username, strong, b");
-  if (spanName && (spanName.textContent || "").trim()) return spanName.textContent.trim();
-  // fallback: look among nearby siblings for nodes that look like a name
-  let sibling = a.previousElementSibling;
-  for (let i = 0; i < 4 && sibling; i++) {
-    const t = (sibling.textContent || "").trim();
-    if (t && t.length > 1 && !/view profile|profile|bet|pot|wager/i.test(t)) return t;
-    sibling = sibling.previousElementSibling;
+  if (spanName && (spanName.textContent || "").trim()) {
+    const t = spanName.textContent.trim();
+    if (!/view profile|profile/i.test(t)) return t;
   }
-  sibling = a.nextElementSibling;
-  for (let i = 0; i < 4 && sibling; i++) {
-    const t = (sibling.textContent || "").trim();
-    if (t && t.length > 1 && !/view profile|profile|bet|pot|wager/i.test(t)) return t;
-    sibling = sibling.nextElementSibling;
+
+  // Inspect immediate previous text nodes (text-based name pattern like "Darkrhoads:")
+  let prev = a.previousSibling;
+  for (let i = 0; i < 6 && prev; i++) {
+    if (prev.nodeType === Node.TEXT_NODE) {
+      const txt = prev.textContent.trim();
+      if (txt) {
+        // common pattern "Name:" or "Name: "
+        const m = txt.match(/([^\n:]{2,40}):\s*$/);
+        if (m && m[1]) return m[1].trim();
+        // or "Name " before anchor
+        const m2 = txt.match(/([^\n]{2,40})$/);
+        if (m2 && m2[1]) {
+          const candidate = m2[1].trim();
+          if (!/view profile|profile|bet|pot|wager/i.test(candidate)) return candidate;
+        }
+      }
+    } else if (prev.nodeType === Node.ELEMENT_NODE) {
+      const t = (prev.textContent || "").trim();
+      const m = t.match(/([^\n:]{2,40}):\s*$/);
+      if (m && m[1]) return m[1].trim();
+    }
+    prev = prev.previousSibling;
   }
-  // last-resort: title attribute of parent nodes
-  let p = a.parentElement;
-  for (let i = 0; i < 4 && p; i++) {
-    const pt = p.getAttribute && (p.getAttribute("title") || p.getAttribute("aria-label") || p.getAttribute("data-original-title"));
-    if (pt && pt.trim()) return pt.trim();
-    p = p.parentElement;
+
+  // Inspect parent element's leading text content before the anchor
+  let parent = a.parentElement;
+  for (let depth = 0; depth < 5 && parent; depth++) {
+    const fullText = parent.textContent || "";
+    // find pattern "NAME:" where NAME is before anchor's own text or before the anchor in parent's text
+    const m = fullText.match(/([A-Za-z0-9_\- \[\]]{2,40}):/);
+    if (m && m[1]) {
+      const cand = m[1].trim();
+      if (!/view profile|profile|settings|logout/i.test(cand)) return cand;
+    }
+    parent = parent.parentElement;
   }
+
   return "Unknown";
 }
 
-/* Improved row discovery to prefer elements that contain both player anchor and numeric pot info */
+/* getLobbyRows: similar to earlier version, robustly chooses row containers */
 function getLobbyRows() {
   const anchors = findProfileAnchorsInRegion(document);
   const rows = new Set();
@@ -253,14 +279,17 @@ function getLobbyRows() {
 }
 
 /* =========================
-   Heuristics for FF and Stats (wider & explicit sources)
-   ========================= */
+   FF/Stats heuristics (expanded)
+   - returns {ff, stats, meta}
+   - meta.sources lists short descriptions of where results came from
+*/
 function heuristicExtractFFAndStats(container) {
   let ff = NaN, stats = NaN;
   const meta = { sources: [] };
   if (!container) return { ff: NaN, stats: NaN, meta };
+
   try {
-    // 1) search elements with data-* attributes likely used by FFScouter
+    // 1) data-* attribute scan (subtree)
     const dataNodes = container.querySelectorAll('[data-ff], [data-ffscore], [data-ff-scouter], [data-ffscouter], [data-stats], [data-stat], [data-statestimate]');
     for (const el of dataNodes) {
       if (!isFinite(ff) && el.dataset && (el.dataset.ff || el.dataset.ffscore || el.dataset.ffScouter || el.dataset.ffscouter)) {
@@ -273,48 +302,52 @@ function heuristicExtractFFAndStats(container) {
       }
     }
 
-    // 2) search for known FFScouter class names / elements (scoped to container and parent)
-    const classSelectors = ['.ffscouter', '.ff-score', '.ffscore', '.ffscore-wrap', '[class*="ffscore"]', '[class*="ff-"]'];
-    for (const sel of classSelectors) {
-      const els = Array.from(container.querySelectorAll(sel));
-      for (const el of els) {
-        const txt = (el.textContent || "").trim();
-        if (!isFinite(ff)) {
-          const m = txt.match(/ff[:\s]*([0-9,\.kmKM]+)/i) || txt.match(/([0-9,\.kmKM]+)\s*ff/i) || txt.match(/^([0-9,\.kmKM]+)$/);
-          if (m) { ff = parseNumber(m[1] || m[0]); meta.sources.push({ type: "class", sel, txt: m[0] }); }
-        }
-        if (!isFinite(stats)) {
-          const m2 = txt.match(/(?:est|stat|stats|estimate)[:\s]*([0-9,\.kmKM]+)/i);
-          if (m2) { stats = parseNumber(m2[1]); meta.sources.push({ type: "class", sel, txt: m2[0] }); }
-        }
-        if (isFinite(ff) && isFinite(stats)) break;
-      }
-      if (isFinite(ff) && isFinite(stats)) break;
-    }
-
-    // 3) check title/data-original-title attributes for FF/Stats hints in subtree and up to parent
-    const attrNodes = Array.from(container.querySelectorAll('*'));
-    for (const el of attrNodes) {
-      const tit = (el.getAttribute && (el.getAttribute('title') || el.getAttribute('aria-label') || el.getAttribute('data-original-title'))) || "";
-      if (tit) {
-        if (!isFinite(ff)) {
-          const m = tit.match(/ff[:\s]*([0-9,\.kmKM]+)/i) || tit.match(/([0-9,\.kmKM]+)\s*ff/i);
-          if (m) { ff = parseNumber(m[1] || m[0]); meta.sources.push({ type: "attr", node: el.tagName, title: tit }); }
-        }
-        if (!isFinite(stats)) {
-          const m2 = tit.match(/(?:est|stat|stats|estimate)[:\s]*([0-9,\.kmKM]+)/i);
-          if (m2) { stats = parseNumber(m2[1]); meta.sources.push({ type: "attr", node: el.tagName, title: tit }); }
+    // 2) class-name patterns
+    if (!isFinite(ff) || !isFinite(stats)) {
+      const classSelectors = ['.ffscouter', '.ff-score', '.ffscore', '.ffscore-wrap', '[class*="ffscore"]', '[class*="ff-"]'];
+      for (const sel of classSelectors) {
+        const els = Array.from(container.querySelectorAll(sel));
+        for (const el of els) {
+          const txt = (el.textContent || "").trim();
+          if (!isFinite(ff)) {
+            const m = txt.match(/ff[:\s]*([0-9,\.kmKM]+)/i) || txt.match(/([0-9,\.kmKM]+)\s*ff/i) || txt.match(/^([0-9,\.kmKM]+)$/);
+            if (m) { ff = parseNumber(m[1] || m[0]); meta.sources.push({ type: "class", sel, txt: m[0] }); }
+          }
+          if (!isFinite(stats)) {
+            const m2 = txt.match(/(?:est|stat|stats|estimate)[:\s]*([0-9,\.kmKM]+)/i);
+            if (m2) { stats = parseNumber(m2[1]); meta.sources.push({ type: "class", sel, txt: m2[0] }); }
+          }
+          if (isFinite(ff) && isFinite(stats)) break;
         }
         if (isFinite(ff) && isFinite(stats)) break;
       }
     }
 
-    // 4) search immediate neighbors around profile anchors inside container
+    // 3) attributes (title/aria/data-original-title)
+    if (!isFinite(ff) || !isFinite(stats)) {
+      const attrNodes = Array.from(container.querySelectorAll('*'));
+      for (const el of attrNodes) {
+        const tit = (el.getAttribute && (el.getAttribute('title') || el.getAttribute('aria-label') || el.getAttribute('data-original-title'))) || "";
+        if (tit) {
+          if (!isFinite(ff)) {
+            const m = tit.match(/ff[:\s]*([0-9,\.kmKM]+)/i) || tit.match(/([0-9,\.kmKM]+)\s*ff/i);
+            if (m) { ff = parseNumber(m[1] || m[0]); meta.sources.push({ type: "attr", node: el.tagName, title: tit }); }
+          }
+          if (!isFinite(stats)) {
+            const m2 = tit.match(/(?:est|stat|stats|estimate)[:\s]*([0-9,\.kmKM]+)/i);
+            if (m2) { stats = parseNumber(m2[1]); meta.sources.push({ type: "attr", node: el.tagName, title: tit }); }
+          }
+          if (isFinite(ff) && isFinite(stats)) break;
+        }
+      }
+    }
+
+    // 4) proximity neighbors around profile anchors in container
     if (!isFinite(ff) || !isFinite(stats)) {
       const anchors = container.querySelectorAll('a[href*="XID"], a[href*="profiles.php"], a[href*="profile.php"]');
       for (const a of anchors) {
         let sib = a.nextElementSibling, steps = 0;
-        while (sib && steps < 8 && (!isFinite(ff) || !isFinite(stats))) {
+        while (sib && steps < 10 && (!isFinite(ff) || !isFinite(stats))) {
           const txt = (sib.textContent || "").trim();
           if (!isFinite(ff)) {
             const m = txt.match(/ff[:\s]*([0-9,\.kmKM]+)/i) || txt.match(/^([0-9,\.kmKM]+)$/);
@@ -330,9 +363,9 @@ function heuristicExtractFFAndStats(container) {
           }
           sib = sib.nextElementSibling; steps++;
         }
-        // previous siblings
+        // previous
         sib = a.previousElementSibling; steps = 0;
-        while (sib && steps < 8 && (!isFinite(ff) || !isFinite(stats))) {
+        while (sib && steps < 10 && (!isFinite(ff) || !isFinite(stats))) {
           const txt = (sib.textContent || "").trim();
           if (!isFinite(ff)) {
             const m = txt.match(/ff[:\s]*([0-9,\.kmKM]+)/i) || txt.match(/^([0-9,\.kmKM]+)$/);
@@ -352,7 +385,7 @@ function heuristicExtractFFAndStats(container) {
       }
     }
 
-    // 5) fallback: regex scan over container text
+    // 5) fallback regex scan over container text
     if (!isFinite(ff) || !isFinite(stats)) {
       const txt = container.textContent || "";
       if (!isFinite(ff)) {
@@ -364,6 +397,7 @@ function heuristicExtractFFAndStats(container) {
         if (m2) { stats = parseNumber(m2[1]); meta.sources.push({ type: "text-scan", sample: (m2[0]||"") }); }
       }
     }
+
   } catch (e) {
     logError("heuristicExtractFFAndStats error", e);
   }
@@ -372,27 +406,23 @@ function heuristicExtractFFAndStats(container) {
 
 /* =========================
    Pot / Bet extraction (improved)
-   ========================= */
+*/
 function findPotOrBetInRow(row) {
   try {
     if (!row) return NaN;
-    // 1) look for nodes with class names likely containing amounts
-    const classNodes = row.querySelectorAll('[class*="pot"], [class*="bet"], [class*="wager"], [class*="amount"], [class*="value"], [class*="price"]');
+    const classNodes = row.querySelectorAll('[class*="pot"], [class*="bet"], [class*="wager"], [class*="amount"], [class*="value"], [class*="price"], [class*="stake"]');
     for (const el of classNodes) {
       const txt = (el.textContent || "").trim();
       const m = txt.match(/([0-9,\.]+[kmKM]?)/);
       if (m) return parseNumber(m[1]);
-      // check data attributes
       if (el.dataset) {
         if (el.dataset.amount) return parseNumber(el.dataset.amount);
         if (el.dataset.value) return parseNumber(el.dataset.value);
       }
     }
-    // 2) look for explicit tokens in text: "Pot:", "Bet:", "Wager:"
     const text = row.textContent || "";
     const m2 = text.match(/(?:pot|bet|wager|stake|stakes|pot:|bet:)[^\d\-]*([0-9,\.kmKM]+)/i);
     if (m2) return parseNumber(m2[1]);
-    // 3) check for nodes having data-amount or data-value attributes anywhere in subtree
     const dataNodes = row.querySelectorAll('[data-amount], [data-value]');
     for (const el of dataNodes) {
       if (el.dataset.amount) {
@@ -404,7 +434,6 @@ function findPotOrBetInRow(row) {
         if (isFinite(n)) return n;
       }
     }
-    // 4) fallback: pick the largest numeric token in the row (likely the pot)
     const allNums = Array.from((text.match(/([0-9,\.]+[kmKM]?)/g) || [])).map(parseNumber).filter(isFinite);
     if (allNums.length) return Math.max(...allNums);
   } catch (e) {
@@ -414,9 +443,8 @@ function findPotOrBetInRow(row) {
 }
 
 /* =========================
-   Filtering & outcomes (kept + unchanged behavior)
-   ========================= */
-
+   Filtering & state management
+*/
 const rowState = new WeakMap();
 const userHealthCheckCache = {};
 const recentWinners = [];
@@ -428,9 +456,7 @@ function applyFilterToRow(row, meta, passes) {
     const old = row.querySelector(".gh-attack"); if (old) old.remove();
     if (!passes) { row.classList.add("gh-hidden"); row.dataset.ghPass = "0"; } else { row.classList.remove("gh-hidden"); row.dataset.ghPass = "1"; }
     rowState.set(row, Object.assign(rowState.get(row) || {}, { lastFilterCheck: Date.now(), meta }));
-  } catch (e) {
-    logError("applyFilterToRow error", e);
-  }
+  } catch (e) { logError("applyFilterToRow error", e); }
 }
 
 function applyAllFilters() {
@@ -460,14 +486,14 @@ function updateMonitorUI() {
     const rows = getLobbyRows();
     rows.forEach(row => {
       const pass = row.dataset && row.dataset.ghPass === "1";
-      if (settings.monitorOn) {
-        row.style.display = pass ? "" : "none";
-      } else row.style.display = "";
+      if (settings.monitorOn) row.style.display = pass ? "" : "none"; else row.style.display = "";
     });
   } catch (e) { logError("updateMonitorUI error", e); }
 }
 
-/* Outcome detection and attack link injection */
+/* =========================
+   Outcome detection + attack injection
+*/
 function detectGameOutcomeForRow(row) {
   if (!row) return null;
   try {
@@ -515,14 +541,11 @@ function markAsWinner(row, uid, name) {
   } catch (e) { logError("markAsWinner error", e); }
 }
 
-/* Recent winners panel */
+/* recent winners panel */
 function ensureRecentWinnersPanel() {
   let panel = document.getElementById("gh-recent-winners");
   if (!panel) {
-    panel = document.createElement("div");
-    panel.id = "gh-recent-winners";
-    panel.innerHTML = `<h4>Recent Winners (60s)</h4><div id="gh-recent-list"></div>`;
-    document.body.appendChild(panel);
+    panel = document.createElement("div"); panel.id = "gh-recent-winners"; panel.innerHTML = `<h4>Recent Winners (60s)</h4><div id="gh-recent-list"></div>`; document.body.appendChild(panel);
   }
   panel.style.display = "";
 }
@@ -535,8 +558,7 @@ function addRecentWinner({ id, name, link }) {
     const right = document.createElement("div");
     const a = document.createElement("a"); a.href = link || "#"; a.target = "_blank"; a.rel = "noopener noreferrer"; a.className = "gh-attack";
     a.innerHTML = '<span class="gh-crosshair" title="Open profile / attack (manual)"></span>';
-    right.appendChild(a);
-    entry.appendChild(left); entry.appendChild(right);
+    right.appendChild(a); entry.appendChild(left); entry.appendChild(right);
     const list = document.getElementById("gh-recent-list"); if (list) list.insertBefore(entry, list.firstChild);
     const created = Date.now(); recentWinners.push({ id, name, created, node: entry });
     const interval = setInterval(() => {
@@ -548,11 +570,12 @@ function addRecentWinner({ id, name, link }) {
 }
 
 /* =========================
-   Observers & periodic scan
-   ========================= */
+   Observers & periodic monitor
+*/
 let observer = null;
 let scanThrottleTimer = null;
 const SCAN_DEBOUNCE_MS = 600;
+
 function startObservers() {
   if (observer) observer.disconnect();
   observer = new MutationObserver(mutations => {
@@ -565,6 +588,7 @@ function startObservers() {
   observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'title', 'alt', 'src'] });
   logDebug("MutationObserver started");
 }
+
 function detectOutcomesFromMutations(mutations) {
   try {
     for (const m of mutations) {
@@ -582,6 +606,7 @@ function detectOutcomesFromMutations(mutations) {
           else if (settings.apiKey && uid) scheduleUserHealthCheck(uid, row, getDisplayNameFromAnchor(a));
         });
       });
+
       const t = m.target;
       if (t && t.nodeType === Node.ELEMENT_NODE) {
         const anchors = findProfileAnchorsInRegion(t);
@@ -629,8 +654,8 @@ function startPeriodicMonitor() {
 }
 
 /* =========================
-   Torn API health checks (cached & rate-limited)
-   ========================= */
+   Torn API checks (optional, cached)
+*/
 function scheduleUserHealthCheck(uid, row, name) {
   if (!settings.apiKey || !uid) return;
   const key = String(uid);
@@ -670,8 +695,8 @@ function scheduleUserHealthCheck(uid, row, name) {
 }
 
 /* =========================
-   Settings modal + Test Extraction + Debug panel
-   ========================= */
+   Settings modal + Test Extraction (include full innerHTML)
+*/
 function tryInsertTopButtons() {
   const textMatches = ["Last Games", "Statistics", "Back to Casino"];
   let container = null;
@@ -710,6 +735,7 @@ function openSettingsModal() {
     <div class="gh-row"><label>Require Known FF (exclude unknown)</label><input id="gh-require-known-ff" type="checkbox" /></div>
     <div class="gh-row"><label>Enable Debug Logs</label><input id="gh-debug-enabled" type="checkbox" /></div>
     <div class="gh-row"><label>Test Extraction Count (top rows)</label><input id="gh-test-count" type="number" min="1" max="50" step="1" /></div>
+    <div class="gh-row"><label>Include full row HTML in test</label><input id="gh-include-html" type="checkbox" /></div>
     <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
       <button class="gh-btn" id="gh-run-test">Run Test Extraction</button>
       <button class="gh-btn" id="gh-copy-logs">Copy Logs to Clipboard</button>
@@ -720,7 +746,7 @@ function openSettingsModal() {
       <button class="gh-btn gh-primary" id="gh-save">Save</button>
       <button class="gh-btn" id="gh-close">Close</button>
     </div>
-    <div id="gh-test-output" style="margin-top:10px; max-height:260px; overflow:auto; background:rgba(255,255,255,0.02); padding:6px; border-radius:6px; font-size:12px;"></div>
+    <div id="gh-test-output" style="margin-top:10px; max-height:340px; overflow:auto; background:rgba(255,255,255,0.02); padding:6px; border-radius:6px; font-size:12px;"></div>
     <div style="font-size:12px;opacity:0.9;margin-top:10px;">
       Note: purely visual monitoring. Optional Torn API key is stored locally. No automated attacks.
     </div>
@@ -736,6 +762,8 @@ function openSettingsModal() {
   document.getElementById("gh-require-known-ff").checked = settings.requireKnownFF;
   document.getElementById("gh-debug-enabled").checked = settings.debugEnabled;
   document.getElementById("gh-test-count").value = settings.testExtractionCount;
+  document.getElementById("gh-include-html").checked = settings.includeFullRowHTML;
+
   document.getElementById("gh-save").onclick = () => {
     settings.minFF = Number(document.getElementById("gh-min-ff").value || DEFAULTS.minFF);
     settings.maxFF = Number(document.getElementById("gh-max-ff").value || DEFAULTS.maxFF);
@@ -747,8 +775,10 @@ function openSettingsModal() {
     settings.requireKnownFF = Boolean(document.getElementById("gh-require-known-ff").checked);
     settings.debugEnabled = Boolean(document.getElementById("gh-debug-enabled").checked);
     settings.testExtractionCount = Number(document.getElementById("gh-test-count").value || DEFAULTS.testExtractionCount);
+    settings.includeFullRowHTML = Boolean(document.getElementById("gh-include-html").checked);
     saveSettings(settings); updateMonitorUI(); applyAllFilters(); logInfo("Settings saved", settings); closeSettingsModal();
   };
+
   document.getElementById("gh-reset").onclick = () => {
     settings = Object.assign({}, DEFAULTS); saveSettings(settings);
     document.getElementById("gh-min-ff").value = settings.minFF; document.getElementById("gh-max-ff").value = settings.maxFF;
@@ -756,8 +786,10 @@ function openSettingsModal() {
     document.getElementById("gh-min-bet").value = settings.minBet; document.getElementById("gh-api-key").value = "";
     document.getElementById("gh-monitor-on").checked = settings.monitorOn; document.getElementById("gh-require-known-ff").checked = settings.requireKnownFF;
     document.getElementById("gh-debug-enabled").checked = settings.debugEnabled; document.getElementById("gh-test-count").value = settings.testExtractionCount;
+    document.getElementById("gh-include-html").checked = settings.includeFullRowHTML;
     applyAllFilters(); logInfo("Settings reset to defaults");
   };
+
   document.getElementById("gh-close").onclick = closeSettingsModal;
   document.getElementById("gh-run-test").onclick = () => runTestExtraction();
   document.getElementById("gh-copy-logs").onclick = () => copyLogsToClipboard();
@@ -766,13 +798,14 @@ function openSettingsModal() {
 
 function closeSettingsModal() { const m = document.getElementById("gh-modal"); if (m) m.remove(); }
 
-/* Test Extraction: prints displayName, anchorText, anchor attrs, row snippet, FF/Stats/Pot & heuristic sources */
+/* Test Extraction now can include full row.innerHTML when checkbox is enabled */
 function runTestExtraction() {
   const out = document.getElementById("gh-test-output");
   if (!out) return;
   out.innerHTML = "<div>Running extraction...</div>";
   try {
     const count = Number(document.getElementById("gh-test-count").value || settings.testExtractionCount || 8);
+    const includeHTML = Boolean(document.getElementById("gh-include-html").checked);
     const rows = getLobbyRows().slice(0, count);
     if (!rows.length) { out.innerHTML = "<div>No rows found on the page. Make sure the lobby is visible.</div>"; return; }
     const lines = [];
@@ -799,20 +832,21 @@ function runTestExtraction() {
         <div style="font-size:12px;margin-top:4px;">anchorText: "${escapeHtml(anchorText)}" anchorAttrs: ${escapeHtml(JSON.stringify(anchorAttrs))}</div>
         <div style="font-size:12px;margin-top:4px;">row snippet: <code style="background:rgba(0,0,0,0.3);padding:2px 4px;border-radius:3px;">${escapeHtml(snippet)}</code></div>
         <div style="font-size:12px;margin-top:4px;">FF: ${isFinite(heur.ff)?heur.ff:"unknown"}; Stats: ${isFinite(heur.stats)?heur.stats:"unknown"}; Pot: ${isFinite(pot)?pot:"unknown"}</div>
-        <div style="font-size:12px;margin-top:4px;">Heuristic sources: ${escapeHtml(JSON.stringify(heur.meta && heur.meta.sources ? heur.meta.sources.slice(0,4) : []))}</div>
-        <div style="font-size:12px;margin-top:4px;">Passes filters: ${passes ? "<span style='color:#6f6'>YES</span>" : "<span style='color:#f66'>NO</span>"}</div></div>`);
-      // log per-row details for debugging
+        <div style="font-size:12px;margin-top:4px;">Heuristic sources: ${escapeHtml(JSON.stringify(heur.meta && heur.meta.sources ? heur.meta.sources.slice(0,6) : []))}</div>
+        <div style="font-size:12px;margin-top:4px;">Passes filters: ${passes ? "<span style='color:#6f6'>YES</span>" : "<span style='color:#f66'>NO</span>"}</div>` +
+        (includeHTML ? `<div style="margin-top:6px;font-size:11px;color:#ddd;background:rgba(0,0,0,0.2);padding:6px;border-radius:4px;"><summary style="font-weight:600">row.innerHTML</summary><pre style="white-space:pre-wrap;max-height:120px;overflow:auto;">${escapeHtml(row.innerHTML)}</pre></div>` : "")
+        + `</div>`);
       logDebug("TestExtraction row", { index: idx+1, displayName, uid, anchorText, anchorAttrs, ff: heur.ff, stats: heur.stats, pot, snippet, sources: heur.meta.sources });
     });
     out.innerHTML = lines.join("");
-    logInfo("Test extraction ran", { count: rows.length });
+    logInfo("Test extraction ran", { count: rows.length, includeHTML });
   } catch (e) {
     out.innerHTML = `<div style="color:#f88">Error running extraction: ${escapeHtml(String(e))}</div>`;
     logError("runTestExtraction error", e);
   }
 }
 
-/* Copy logs */
+/* copy logs & debug panel */
 function copyLogsToClipboard() {
   try {
     const toCopy = logBuffer.map(l => `${new Date(l.ts).toISOString()} [${l.level.toUpperCase()}] ${l.msg} ${l.meta ? JSON.stringify(l.meta) : ""}`).join("\n");
@@ -822,14 +856,11 @@ function copyLogsToClipboard() {
   } catch (e) { logError("copyLogsToClipboard error", e); alert("Failed to copy logs - check console."); }
 }
 
-/* Debug panel */
 function ensureDebugPanel() {
   let panel = document.getElementById("gh-debug-panel");
   if (!panel) {
     panel = document.createElement("div"); panel.id = "gh-debug-panel"; panel.innerHTML = `<h4>GameHunt Debug Panel</h4><div id="gh-debug-list"></div><div style="display:flex;gap:6px;margin-top:6px;"><button id="gh-debug-clear" class="gh-btn">Clear</button><button id="gh-debug-close" class="gh-btn">Close</button></div>`;
-    document.body.appendChild(panel);
-    document.getElementById("gh-debug-clear").onclick = () => { logBuffer.length = 0; updateDebugPanel(); };
-    document.getElementById("gh-debug-close").onclick = () => { panel.style.display = "none"; };
+    document.body.appendChild(panel); document.getElementById("gh-debug-clear").onclick = () => { logBuffer.length = 0; updateDebugPanel(); }; document.getElementById("gh-debug-close").onclick = () => { panel.style.display = "none"; };
   }
   panel.style.display = settings.debugEnabled ? "" : "none";
   updateDebugPanel();
@@ -845,13 +876,13 @@ function updateDebugPanel() {
 }
 
 /* =========================
-   Init / bootstrap
-   ========================= */
+   Initialization
+*/
 function initialScanAndBootstrap() {
   addStyles(); tryInsertTopButtons(); ensureRecentWinnersPanel(); updateMonitorUI(); applyAllFilters(); startObservers(); startPeriodicMonitor(); ensureDebugPanel();
-  try { GM_registerMenuCommand && GM_registerMenuCommand("Game Hunting Settings", openSettingsModal); } catch(e) {}
+  try { GM_registerMenuCommand && GM_registerMenuCommand("Game Hunting Settings", openSettingsModal); } catch (e) {}
   logInfo("Game Hunting script initialized", { settings });
 }
 if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", initialScanAndBootstrap); else initialScanAndBootstrap();
 
-/* End of script */
+/* End of Script */
