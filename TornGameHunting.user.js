@@ -5,8 +5,8 @@
 // @description  Visual filter & monitor for Torn.com Russian Roulette lobby. Integrates FFScouter DOM notes, optional Torn API health checks. Does NOT automate actions (no auto-click). For Tampermonkey/Greasemonkey. See install instructions below.
 // @author       ShavedW00kie (via Copilot Space)
 // @homepageURL  https://github.com/ShavedW00kie
-// @downloadURL  https://gist.githubusercontent.com/ShavedW00kie/fd414d7498a01308ef65a8f997a77301/raw/89a6cf117b1d525371052553a471614f68d2aed4/TornGameHunting.user.js
-// @updateURL    https://gist.githubusercontent.com/ShavedW00kie/fd414d7498a01308ef65a8f997a77301/raw/89a6cf117b1d525371052553a471614f68d2aed4/TornGameHunting.user.js
+// @downloadURL  https://gist.githubusercontent.com/ShavedW00kie/fd414d7498a01308ef65a8f997a77301/raw/TornGameHunting.user.js
+// @updateURL    https://gist.githubusercontent.com/ShavedW00kie/fd414d7498a01308ef65a8f997a77301/raw/TornGameHunting.user.js
 // @match        https://www.torn.com/page.php?sid=russianRoulette*
 // @grant        GM_getValue
 // @grant        GM_setValue
